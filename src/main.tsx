@@ -106,19 +106,20 @@ const router = createBrowserRouter([
                 path: "dashboard",
                 element: <ProjectDashboard />,
               },
-              {
-                path: "assets",
-                element: <AssetManagement />,
-              },
-              {
-                path: "gameplay",
-                element: <GameplayManagement />,
-              },
-              {
-                path: "database",
-                element: <DatabaseManagement />,
-              },
+              // Removed nested asset, gameplay, database routes
             ],
+          },
+          {
+            path: "/admin/assets",
+            element: <AssetManagement />,
+          },
+          {
+            path: "/admin/gameplay",
+            element: <GameplayManagement />,
+          },
+          {
+            path: "/admin/database",
+            element: <DatabaseManagement />,
           },
         ],
       },

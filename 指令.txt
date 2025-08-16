@@ -4,3 +4,8 @@ cd server node index.js
 前端：
 根目录输入
 npm run dev
+
+
+前端注意，代码改了会有可能缓存冲突，看情况清理：
+清除 npm 缓存：在命令行中运行 
+npm cache clean --force

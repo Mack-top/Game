@@ -1,39 +1,94 @@
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, Database, Table, Edit, Trash2, Eye } from 'lucide-react';
+import { PlusCircle, Database, Table, Edit, Trash2, Eye, Folder, Plus, ArrowLeft } from 'lucide-react'; // Added Plus and ArrowLeft
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { useNavigate } from 'react-router-dom'; // Import useNavigate
-import { ArrowLeft } from 'lucide-react'; // Import ArrowLeft icon
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/context/AuthContext';
+import { Table as ShadcnTable, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface DatabaseTable {
   id: string;
   name: string;
   description: string;
-  recordCount: number; // This will remain mock or derived if possible
-  fields: { name: string; type: string }[]; // Simplified fields
+  recordCount: number;
+  fields: { name: string; type: string }[];
+}
+
+interface Project {
+  id: string;
+  name: string;
 }
 
 const DatabaseManagement: React.FC = () => {
-  const { projectId } = useParams<{ projectId: string }>();
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [tables, setTables] = useState<DatabaseTable[]>([]);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingTable, setEditingTable] = useState<DatabaseTable | null>(null);
   const [tableName, setTableName] = useState('');
   const [tableDescription, setTableDescription] = useState('');
   const [tableFields, setTableFields] = useState<{ name: string; type: string }[]>([{ name: '', type: '' }]);
+  
+  // State for viewing records
+  const [isViewRecordsDialogOpen, setIsViewRecordsDialogOpen] = useState(false);
+  const [viewingTableData, setViewingTableData] = useState<any[]>([]);
+  const [viewingTableFields, setViewingTableFields] = useState<{ name: string; type: string }[]>([]);
+  const [viewingTableName, setViewingTableName] = useState('');
+
+  // State for adding records
+  const [isAddRecordDialogOpen, setIsAddRecordDialogOpen] = useState(false);
+  const [currentTableForRecord, setCurrentTableForRecord] = useState<DatabaseTable | null>(null);
+  const [newRecordData, setNewRecordData] = useState<any>({});
+
+
   const { toast } = useToast();
-  const navigate = useNavigate(); // Initialize useNavigate
+  const navigate = useNavigate();
+  const { token } = useAuth();
+
+  useEffect(() => {
+    const fetchProjects = async () => {
+      try {
+        const response = await fetch('http://localhost:3002/api/projects', {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data: Project[] = await response.json();
+        setProjects(data);
+        if (data.length > 0) {
+          setSelectedProjectId(data[0].id); // Automatically select the first project
+        }
+      } catch (error) {
+        console.error("Failed to fetch projects:", error);
+        toast({
+          title: "加载失败",
+          description: "无法加载项目列表。",
+          variant: "destructive",
+        });
+      }
+    };
+    if (token) {
+      fetchProjects();
+    }
+  }, [token, toast]);
 
   const fetchTables = async () => {
+    if (!selectedProjectId) {
+      setTables([]);
+      return;
+    }
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch(`http://localhost:3002/api/user-tables/${projectId}`, {
+      const response = await fetch(`http://localhost:3002/api/user-tables/${selectedProjectId}`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -42,12 +97,30 @@ const DatabaseManagement: React.FC = () => {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const data = await response.json();
-      const fetchedTables: DatabaseTable[] = data.map((item: any) => ({
-        id: item.id.toString(),
-        name: item.name,
-        description: item.description,
-        recordCount: Math.floor(Math.random() * 1000) + 50, // Mock record count for now
-        fields: JSON.parse(item.schemaJson || '[]'),
+      const fetchedTables: DatabaseTable[] = await Promise.all(data.map(async (item: any) => {
+        const fields = JSON.parse(item.schemaJson || '[]');
+        let recordCount = 0;
+        try {
+          const countResponse = await fetch(`http://localhost:3002/api/user-tables/${item.id}/data`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+          if (countResponse.ok) {
+            const records = await countResponse.json();
+            recordCount = records.length;
+          }
+        } catch (countError) {
+          console.error(`Failed to fetch record count for table ${item.name}:`, countError);
+        }
+
+        return {
+          id: item.id.toString(),
+          name: item.name,
+          description: item.description,
+          recordCount: recordCount,
+          fields: fields,
+        };
       }));
       setTables(fetchedTables);
     } catch (error) {
@@ -62,7 +135,7 @@ const DatabaseManagement: React.FC = () => {
 
   useEffect(() => {
     fetchTables();
-  }, [projectId]);
+  }, [selectedProjectId, token]);
 
   const resetForm = () => {
     setEditingTable(null);
@@ -99,10 +172,10 @@ const DatabaseManagement: React.FC = () => {
   };
 
   const handleSave = async () => {
-    if (!tableName.trim() || !tableDescription.trim()) {
+    if (!tableName.trim() || !tableDescription.trim() || !selectedProjectId) {
       toast({
         title: "保存失败",
-        description: "表名称和描述不能为空。",
+        description: "表名称、描述和项目不能为空。",
         variant: "destructive",
       });
       return;
@@ -119,7 +192,7 @@ const DatabaseManagement: React.FC = () => {
     }
 
     const payload = {
-      projectId: projectId,
+      projectId: selectedProjectId,
       name: tableName,
       description: tableDescription,
       schemaJson: JSON.stringify(validFields),
@@ -132,7 +205,7 @@ const DatabaseManagement: React.FC = () => {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Authorization': `Bearer ${token}`,
           },
           body: JSON.stringify(payload),
         });
@@ -141,7 +214,7 @@ const DatabaseManagement: React.FC = () => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Authorization': `Bearer ${token}`,
           },
           body: JSON.stringify(payload),
         });
@@ -151,7 +224,7 @@ const DatabaseManagement: React.FC = () => {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      fetchTables(); // Re-fetch data to update UI
+      fetchTables();
       setIsDialogOpen(false);
       resetForm();
       toast({
@@ -169,8 +242,15 @@ const DatabaseManagement: React.FC = () => {
   };
 
   const handleDelete = async (id: string) => {
+    if (!selectedProjectId) {
+      toast({
+        title: "删除失败",
+        description: "请先选择一个项目。",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
-      const token = localStorage.getItem('token');
       const response = await fetch(`http://localhost:3002/api/user-tables/${id}`, {
         method: 'DELETE',
         headers: {
@@ -182,7 +262,7 @@ const DatabaseManagement: React.FC = () => {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      fetchTables(); // Re-fetch data to update UI
+      fetchTables();
       toast({
         title: "删除成功",
         description: "数据表已删除。",
@@ -197,6 +277,96 @@ const DatabaseManagement: React.FC = () => {
     }
   };
 
+  const handleViewRecords = async (tableId: string, tableName: string, tableFields: { name: string; type: string }[]) => {
+    try {
+      const response = await fetch(`http://localhost:3002/api/user-tables/${tableId}/data`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setViewingTableData(data);
+      setViewingTableFields(tableFields);
+      setViewingTableName(tableName);
+      setIsViewRecordsDialogOpen(true);
+    } catch (error) {
+      console.error("Failed to fetch table records:", error);
+      toast({
+        title: "加载失败",
+        description: "无法加载数据表记录。",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleOpenAddRecordDialog = (table: DatabaseTable) => {
+    setCurrentTableForRecord(table);
+    // Initialize newRecordData with empty strings for all fields
+    const initialData: any = {};
+    table.fields.forEach(field => {
+      initialData[field.name] = '';
+    });
+    setNewRecordData(initialData);
+    setIsAddRecordDialogOpen(true);
+  };
+
+  const handleRecordInputChange = (fieldName: string, value: string) => {
+    setNewRecordData((prevData: any) => ({
+      ...prevData,
+      [fieldName]: value,
+    }));
+  };
+
+  const handleSaveRecord = async () => {
+    if (!currentTableForRecord) return;
+
+    // Basic validation: ensure all fields have some value (can be expanded)
+    for (const field of currentTableForRecord.fields) {
+      if (!newRecordData[field.name] && field.type !== 'boolean') { // Allow boolean to be false/empty
+        toast({
+          title: "保存失败",
+          description: `字段 "${field.name}" 不能为空。`,
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    try {
+      const response = await fetch(`http://localhost:3002/api/user-tables/${currentTableForRecord.id}/data`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify(newRecordData),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      toast({
+        title: "记录添加成功",
+        description: `已向表 "${currentTableForRecord.name}" 添加新记录。`,
+      });
+      setIsAddRecordDialogOpen(false);
+      setNewRecordData({});
+      fetchTables(); // Refresh table list to update record count
+    } catch (error) {
+      console.error("Failed to add record:", error);
+      toast({
+        title: "添加记录失败",
+        description: "无法向数据表添加记录。",
+        variant: "destructive",
+      });
+    }
+  };
+
+
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="mb-4">
@@ -207,145 +377,263 @@ const DatabaseManagement: React.FC = () => {
       <Card className="bg-gray-800 text-white border-gray-700 shadow-lg mb-8">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <div>
-            <CardTitle className="text-2xl font-bold text-blue-400">项目 {projectId} - 数据库管理</CardTitle>
+            <CardTitle className="text-2xl font-bold text-blue-400">数据库管理</CardTitle>
             <CardDescription className="text-gray-300">
               在这里管理您的游戏数据库，包括数据表和记录。
             </CardDescription>
           </div>
-          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-            <DialogTrigger asChild>
-              <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={() => handleOpenDialog()}>
-                <PlusCircle className="mr-2 h-4 w-4" />
-                创建新表
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-[600px] bg-gray-900 text-white border-gray-700">
-              <DialogHeader>
-                <DialogTitle className="text-blue-400">{editingTable ? '编辑数据表' : '创建新表'}</DialogTitle>
-                <DialogDescription className="text-gray-400">
-                  {editingTable ? '修改数据表的结构和信息。' : '定义一个新的数据表。'}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-4">
-                <div className="grid grid-cols-4 items-center gap-4">
-                  <Label htmlFor="tableName" className="text-right text-gray-300">
-                    表名称
-                  </Label>
-                  <Input
-                    id="tableName"
-                    value={tableName}
-                    onChange={(e) => setTableName(e.target.value)}
-                    className="col-span-3 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
-                  />
+          <div className="flex items-center space-x-4">
+            <Select value={selectedProjectId || ''} onValueChange={setSelectedProjectId}>
+              <SelectTrigger className="w-[180px] bg-gray-800 border-gray-600 text-white focus:border-blue-500">
+                <SelectValue placeholder="选择项目" />
+              </SelectTrigger>
+              <SelectContent className="bg-gray-800 border-gray-700 text-white">
+                {projects.map((project) => (
+                  <SelectItem key={project.id} value={project.id}>
+                    {project.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+              <DialogTrigger asChild>
+                <Button className="bg-blue-600 hover:bg-blue-700 text-white" disabled={!selectedProjectId} onClick={() => handleOpenDialog()}>
+                  <PlusCircle className="mr-2 h-4 w-4" />
+                  创建新表
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-[600px] bg-gray-900 text-white border-gray-700">
+                <DialogHeader>
+                  <DialogTitle className="text-blue-400">{editingTable ? '编辑数据表' : '创建新表'}</DialogTitle>
+                  <DialogDescription className="text-gray-400">
+                    {editingTable ? '修改数据表的结构和信息。' : '定义一个新的数据表。'}
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                  <div className="grid grid-cols-4 items-center gap-4">
+                    <Label htmlFor="tableName" className="text-right text-gray-300">
+                      表名称
+                    </Label>
+                    <Input
+                      id="tableName"
+                      value={tableName}
+                      onChange={(e) => setTableName(e.target.value)}
+                      className="col-span-3 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="grid grid-cols-4 items-center gap-4">
+                    <Label htmlFor="tableDescription" className="text-right text-gray-300">
+                      描述
+                    </Label>
+                    <Textarea
+                      id="tableDescription"
+                      value={tableDescription}
+                      onChange={(e) => setTableDescription(e.target.value)}
+                      className="col-span-3 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
+                      rows={3}
+                    />
+                  </div>
+                  <div className="col-span-4">
+                    <h3 className="text-lg font-semibold text-gray-200 mb-2">字段定义</h3>
+                    {tableFields.map((field, index) => (
+                      <div key={index} className="grid grid-cols-6 items-center gap-2 mb-2">
+                        <Label htmlFor={`fieldName-${index}`} className="col-span-1 text-right text-gray-300">
+                          字段名
+                        </Label>
+                        <Input
+                          id={`fieldName-${index}`}
+                          value={field.name}
+                          onChange={(e) => handleFieldChange(index, 'name', e.target.value)}
+                          className="col-span-2 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
+                          placeholder="例如: userId"
+                        />
+                        <Label htmlFor={`fieldType-${index}`} className="col-span-1 text-right text-gray-300">
+                          类型
+                        </Label>
+                        <Input
+                          id={`fieldType-${index}`}
+                          value={field.type}
+                          onChange={(e) => handleFieldChange(index, 'type', e.target.value)}
+                          className="col-span-1 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
+                          placeholder="例如: string"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveField(index)}
+                          className="col-span-1 text-red-400 hover:bg-red-900/20"
+                        >
+                          移除
+                        </Button>
+                      </div>
+                    ))}
+                    <Button variant="outline" onClick={handleAddField} className="mt-2 text-blue-400 border-blue-400 hover:bg-blue-900/20">
+                      添加字段
+                    </Button>
+                  </div>
                 </div>
-                <div className="grid grid-cols-4 items-center gap-4">
-                  <Label htmlFor="tableDescription" className="text-right text-gray-300">
-                    描述
-                  </Label>
-                  <Textarea
-                    id="tableDescription"
-                    value={tableDescription}
-                    onChange={(e) => setTableDescription(e.target.value)}
-                    className="col-span-3 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
-                    rows={3}
-                  />
-                </div>
-                <div className="col-span-4">
-                  <h3 className="text-lg font-semibold text-gray-200 mb-2">字段定义</h3>
-                  {tableFields.map((field, index) => (
-                    <div key={index} className="grid grid-cols-6 items-center gap-2 mb-2">
-                      <Label htmlFor={`fieldName-${index}`} className="col-span-1 text-right text-gray-300">
-                        字段名
-                      </Label>
-                      <Input
-                        id={`fieldName-${index}`}
-                        value={field.name}
-                        onChange={(e) => handleFieldChange(index, 'name', e.target.value)}
-                        className="col-span-2 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
-                        placeholder="例如: userId"
-                      />
-                      <Label htmlFor={`fieldType-${index}`} className="col-span-1 text-right text-gray-300">
-                        类型
-                      </Label>
-                      <Input
-                        id={`fieldType-${index}`}
-                        value={field.type}
-                        onChange={(e) => handleFieldChange(index, 'type', e.target.value)}
-                        className="col-span-1 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
-                        placeholder="例如: string"
-                      />
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleRemoveField(index)}
-                        className="col-span-1 text-red-400 hover:bg-red-900/20"
-                      >
-                        移除
-                      </Button>
-                    </div>
-                  ))}
-                  <Button variant="outline" onClick={handleAddField} className="mt-2 text-blue-400 border-blue-400 hover:bg-blue-900/20">
-                    添加字段
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsDialogOpen(false)} className="text-gray-300 border-gray-600 hover:bg-gray-700 hover:text-white mr-2">
+                    取消
                   </Button>
-                </div>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setIsDialogOpen(false)} className="text-gray-300 border-gray-600 hover:bg-gray-700 hover:text-white mr-2">
-                  取消
-                </Button>
-                <Button onClick={handleSave} className="bg-blue-600 hover:bg-blue-700 text-white">
-                  保存
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+                  <Button onClick={handleSave} className="bg-blue-600 hover:bg-blue-700 text-white">
+                    保存
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
         </CardHeader>
       </Card>
 
-      {tables.length === 0 ? (
+      {!selectedProjectId ? (
+        <div className="text-center text-gray-400 py-10">
+          <Folder className="mx-auto h-12 w-12 mb-4 text-gray-500" />
+          <p className="text-lg">请先选择一个项目来管理数据表。</p>
+          <p className="text-sm">您可以在上方下拉菜单中选择一个项目。</p>
+        </div>
+      ) : tables.length === 0 ? (
         <div className="text-center text-gray-400 py-10">
           <Database className="mx-auto h-12 w-12 mb-4 text-gray-500" />
-          <p className="text-lg">暂无自定义数据表。</p>
+          <p className="text-lg">当前项目暂无自定义数据表。</p>
           <p className="text-sm">点击“创建新表”开始定义您的游戏数据结构。</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {tables.map((table) => (
-            <Card key={table.id} className="bg-gradient-to-br from-gray-800 to-gray-900 text-white shadow-lg border-gray-700">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <Card key={table.id} className="bg-gradient-to-br from-gray-800 to-gray-900 text-white shadow-lg border-gray-700 flex flex-col">
+              <CardHeader className="pb-2">
                 <div className="flex items-center space-x-2">
-                  <Table className="h-5 w-5 text-blue-400" />
-                  <CardTitle className="text-lg font-bold">{table.name}</CardTitle>
+                  <Table className="h-5 w-5 text-blue-400 flex-shrink-0" />
+                  <CardTitle className="text-lg font-bold truncate">{table.name}</CardTitle>
                 </div>
               </CardHeader>
-              <CardContent>
-                <p className="text-sm text-gray-300 line-clamp-2">描述: {table.description}</p>
-                <p className="text-sm text-gray-300">记录数: {table.recordCount}</p>
-                <div className="mt-2">
-                  <h4 className="text-xs font-semibold text-gray-400">字段:</h4>
-                  <ul className="list-disc list-inside text-xs text-gray-400 max-h-16 overflow-auto">
-                    {table.fields.map((field, idx) => (
-                      <li key={idx}>{field.name} ({field.type})</li>
-                    ))}
-                  </ul>
+              <CardContent className="flex-grow">
+                <p className="text-sm text-gray-300 line-clamp-2 mb-1">描述: {table.description}</p>
+                <p className="text-sm text-gray-300 mb-2">记录数: {table.recordCount}</p>
+                <div>
+                  <h4 className="text-xs font-semibold text-gray-400 mb-1">字段:</h4>
+                  <div className="max-h-20 overflow-y-auto pr-1 custom-scrollbar">
+                    <table className="w-full text-xs text-gray-400">
+                      <tbody>
+                        {table.fields.map((field, idx) => (
+                          <tr key={idx} className="border-b border-gray-700 last:border-0">
+                            <td className="py-1 pr-2 font-medium">{field.name}</td>
+                            <td className="py-1 text-gray-500 italic">{field.type}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </CardContent>
-              <CardContent className="flex justify-end space-x-2 pt-0">
-                <Button variant="outline" size="sm" className="text-blue-300 border-blue-300 hover:bg-blue-300 hover:text-blue-900" onClick={() => toast({ title: "功能开发中", description: "查看记录功能正在开发中。", variant: "default" })}>
-                  <Eye className="h-4 w-4" />
-                  <span className="ml-1">查看记录</span>
-                </Button>
-                <Button variant="outline" size="sm" className="text-yellow-300 border-yellow-300 hover:bg-yellow-300 hover:text-yellow-900" onClick={() => handleOpenDialog(table)}>
-                  <Edit className="h-4 w-4" />
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => handleDelete(table.id)}>
-                  <Trash2 className="h-4 w-4" />
-                </Button>
+              <CardContent className="pt-0">
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <Button variant="outline" size="sm" className="text-blue-300 border-blue-300 hover:bg-blue-300 hover:text-blue-900 w-full" onClick={() => handleViewRecords(table.id, table.name, table.fields)}>
+                    <Eye className="h-4 w-4 mr-1" />
+                    查看记录
+                  </Button>
+                  <Button variant="outline" size="sm" className="text-green-300 border-green-300 hover:bg-green-300 hover:text-green-900 w-full" onClick={() => handleOpenAddRecordDialog(table)}>
+                    <Plus className="h-4 w-4 mr-1" />
+                    添加记录
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button variant="outline" size="sm" className="text-yellow-300 border-yellow-300 hover:bg-yellow-300 hover:text-yellow-900 w-full" onClick={() => handleOpenDialog(table)}>
+                    <Edit className="h-4 w-4 mr-1" />
+                    编辑表
+                  </Button>
+                  <Button variant="destructive" size="sm" className="w-full" onClick={() => handleDelete(table.id)}>
+                    <Trash2 className="h-4 w-4 mr-1" />
+                    删除表
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           ))}
         </div>
       )}
+
+      {/* View Records Dialog */}
+      <Dialog open={isViewRecordsDialogOpen} onOpenChange={setIsViewRecordsDialogOpen}>
+        <DialogContent className="sm:max-w-[800px] bg-gray-900 text-white border-gray-700">
+          <DialogHeader>
+            <DialogTitle className="text-blue-400">查看表 "{viewingTableName}" 的记录</DialogTitle>
+            <DialogDescription className="text-gray-400">
+              以下是表 "{viewingTableName}" 中的所有记录。
+            </DialogDescription>
+          </DialogHeader>
+          <ScrollArea className="h-[400px] w-full rounded-md border border-gray-700 p-4">
+            {viewingTableData.length === 0 ? (
+              <div className="text-center text-gray-400 py-10">
+                <p>暂无记录。</p>
+              </div>
+            ) : (
+              <ShadcnTable className="w-full">
+                <TableHeader>
+                  <TableRow className="bg-gray-800">
+                    {viewingTableFields.map((field) => (
+                      <TableHead key={field.name} className="text-gray-300">{field.name} ({field.type})</TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {viewingTableData.map((row, rowIndex) => (
+                    <TableRow key={rowIndex} className="border-gray-700 hover:bg-gray-800">
+                      {viewingTableFields.map((field) => (
+                        <TableCell key={field.name} className="text-gray-200">
+                          {row[field.name] !== undefined && row[field.name] !== null ? row[field.name].toString() : 'N/A'}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </ShadcnTable>
+            )}
+          </ScrollArea>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsViewRecordsDialogOpen(false)} className="text-gray-300 border-gray-600 hover:bg-gray-700 hover:text-white">
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Record Dialog */}
+      <Dialog open={isAddRecordDialogOpen} onOpenChange={setIsAddRecordDialogOpen}>
+        <DialogContent className="sm:max-w-[600px] bg-gray-900 text-white border-gray-700">
+          <DialogHeader>
+            <DialogTitle className="text-blue-400">向表 "{currentTableForRecord?.name}" 添加记录</DialogTitle>
+            <DialogDescription className="text-gray-400">
+              请填写以下字段以添加新记录。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            {currentTableForRecord?.fields.map((field) => (
+              <div key={field.name} className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor={`record-${field.name}`} className="text-right text-gray-300">
+                  {field.name} ({field.type})
+                </Label>
+                <Input
+                  id={`record-${field.name}`}
+                  value={newRecordData[field.name] || ''}
+                  onChange={(e) => handleRecordInputChange(field.name, e.target.value)}
+                  className="col-span-3 bg-gray-800 border-gray-600 text-white focus:border-blue-500"
+                  type={field.type === 'number' ? 'number' : 'text'} // Basic type handling
+                />
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsAddRecordDialogOpen(false)} className="text-gray-300 border-gray-600 hover:bg-gray-700 hover:text-white mr-2">
+              取消
+            </Button>
+            <Button onClick={handleSaveRecord} className="bg-blue-600 hover:bg-blue-700 text-white">
+              保存记录
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

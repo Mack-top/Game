@@ -34,6 +34,22 @@ module.exports = (db) => {
     });
   };
 
+  // Helper function to map frontend types to SQLite types
+  const mapToSqliteType = (frontendType) => {
+    if (!frontendType) return 'TEXT'; // Default to TEXT if type is undefined or null
+    switch (frontendType.toLowerCase()) {
+      case 'string':
+        return 'TEXT';
+      case 'number':
+        return 'REAL'; // Use REAL for floating point numbers, INTEGER for whole numbers
+      case 'boolean':
+        return 'INTEGER'; // SQLite stores booleans as 0 or 1
+      // Add more mappings as needed
+      default:
+        return 'TEXT'; // Default to TEXT for unknown types
+    }
+  };
+
   // --- Multer Configuration for File Uploads ---
   const storage = multer.diskStorage({
     destination: function (req, file, cb) {
@@ -632,20 +648,56 @@ module.exports = (db) => {
     });
   });
 
-  // POST a new user table metadata
+  // POST a new user table metadata and create the actual table
   app.post('/api/user-tables', (req, res) => {
     const { projectId, name, description, schemaJson } = req.body;
     if (!projectId || !name || !schemaJson) {
       return res.status(400).json({ error: 'Project ID, name, and schemaJson are required.' });
     }
+
+    const parsedSchema = JSON.parse(schemaJson);
+    if (!Array.isArray(parsedSchema) || parsedSchema.length === 0) {
+      return res.status(400).json({ error: 'Schema must be a non-empty array of field objects.' });
+    }
+
+    // First, insert metadata
     db.run('INSERT INTO user_tables_metadata (projectId, name, description, schemaJson) VALUES (?, ?, ?, ?)',
       [projectId, name, description, schemaJson],
       function (err) {
         if (err) {
-          res.status(500).json({ error: err.message });
-          return;
+          return res.status(500).json({ error: err.message });
         }
-        res.status(201).json({ id: this.lastID, projectId, name, description, schemaJson });
+
+        const metadataId = this.lastID;
+        const actualTableName = `user_data_table_${metadataId}`; // Generate unique table name
+
+        // Construct CREATE TABLE SQL with mapped types
+        const fieldsSql = parsedSchema.map(field => `"${field.name}" ${mapToSqliteType(field.type)}`).join(', ');
+        const createTableSql = `CREATE TABLE IF NOT EXISTS "${actualTableName}" (id INTEGER PRIMARY KEY AUTOINCREMENT, ${fieldsSql})`;
+
+        // Create the actual data table
+        db.run(createTableSql, [], (createErr) => {
+          if (createErr) {
+            // If table creation fails, rollback metadata insertion
+            db.run('DELETE FROM user_tables_metadata WHERE id = ?', [metadataId], (deleteErr) => {
+              if (deleteErr) console.error("Error rolling back metadata:", deleteErr.message);
+            });
+            return res.status(500).json({ error: `Failed to create actual table: ${createErr.message}` });
+          }
+
+          // Update metadata with actualTableName
+          db.run('UPDATE user_tables_metadata SET actualTableName = ? WHERE id = ?',
+            [actualTableName, metadataId],
+            (updateErr) => {
+              if (updateErr) {
+                console.error("Error updating metadata with actualTableName:", updateErr.message);
+                // Consider rolling back table creation here too if critical
+              }
+              logActivity('数据库管理', `创建了新数据表: "${name}" (项目ID: ${projectId})`);
+              res.status(201).json({ id: metadataId, projectId, name, description, schemaJson, actualTableName });
+            }
+          );
+        });
       }
     );
   });
@@ -673,19 +725,200 @@ module.exports = (db) => {
     );
   });
 
-  // DELETE a user table metadata
+  // GET data from a user-defined table
+  app.get('/api/user-tables/:tableId/data', (req, res) => {
+    const { tableId } = req.params;
+
+    db.get('SELECT actualTableName FROM user_tables_metadata WHERE id = ?', [tableId], (err, row) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (!row || !row.actualTableName) {
+        return res.status(404).json({ error: 'User table not found or actual table name not set.' });
+      }
+
+      const actualTableName = row.actualTableName;
+      const schema = JSON.parse(row.schemaJson || '[]'); // Get schema for type conversion
+
+      const sql = `SELECT * FROM "${actualTableName}"`; // Use double quotes for table name to handle special characters if any
+
+      db.all(sql, [], (dataErr, rows) => {
+        if (dataErr) {
+          console.error(`Error fetching data from table "${actualTableName}":`, dataErr.message);
+          return res.status(500).json({ error: `Failed to fetch data from table "${actualTableName}": ${dataErr.message}` });
+        }
+
+        // Convert data types back to frontend expectations based on schema
+        const convertedRows = rows.map(record => {
+          const newRecord = { ...record };
+          for (const field of schema) {
+            if (newRecord.hasOwnProperty(field.name)) {
+              if (field.type.toLowerCase() === 'boolean') {
+                newRecord[field.name] = Boolean(newRecord[field.name]); // Convert 0/1 to false/true
+              } else if (field.type.toLowerCase() === 'number') {
+                newRecord[field.name] = Number(newRecord[field.name]); // Ensure it's a number
+              }
+              // Add other type conversions if necessary (e.g., date strings to Date objects)
+            }
+          }
+          return newRecord;
+        });
+        res.json(convertedRows);
+      });
+    });
+  });
+
+  // POST data to a user-defined table
+  app.post('/api/user-tables/:tableId/data', (req, res) => {
+    const { tableId } = req.params;
+    const recordData = req.body; // The data to insert
+
+    db.get('SELECT actualTableName, schemaJson FROM user_tables_metadata WHERE id = ?', [tableId], (err, row) => {
+      if (err) {
+        console.error(`Error fetching metadata for tableId ${tableId}:`, err.message);
+        return res.status(500).json({ error: err.message });
+      }
+      if (!row || !row.actualTableName) {
+        console.warn(`User table not found or actual table name not set for tableId ${tableId}.`);
+        return res.status(404).json({ error: 'User table not found or actual table name not set.' });
+      }
+
+      const actualTableName = row.actualTableName;
+      const schema = JSON.parse(row.schemaJson || '[]');
+
+      // Validate incoming data against schema and prepare for insertion
+      const columns = [];
+      const placeholders = [];
+      const values = [];
+
+      for (const field of schema) {
+        if (recordData.hasOwnProperty(field.name)) {
+          columns.push(`"${field.name}"`);
+          placeholders.push('?');
+          let value = recordData[field.name];
+
+          // Type conversion based on schema for insertion
+          if (field.type.toLowerCase() === 'number') {
+            value = Number(value);
+            if (isNaN(value)) {
+              console.warn(`Invalid number value for field "${field.name}":`, recordData[field.name]);
+              return res.status(400).json({ error: `Invalid number value for field "${field.name}".` });
+            }
+          } else if (field.type.toLowerCase() === 'boolean') {
+            value = Boolean(value) ? 1 : 0; // Convert to 0 or 1 for SQLite INTEGER
+          }
+          values.push(value);
+        }
+      }
+
+      if (columns.length === 0) {
+        console.warn('No valid data provided for insertion based on table schema.');
+        return res.status(400).json({ error: 'No valid data provided for insertion based on table schema.' });
+      }
+
+      const sql = `INSERT INTO "${actualTableName}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+      console.log(`[DB-INSERT] Executing SQL: ${sql}`);
+      console.log(`[DB-INSERT] With values: ${JSON.stringify(values)}`);
+
+      db.run(sql, values, function(insertErr) {
+        if (insertErr) {
+          console.error(`[DB-INSERT-ERROR] Failed to insert data into table "${actualTableName}": ${insertErr.message}`);
+          return res.status(500).json({ error: `Failed to insert data into table "${actualTableName}": ${insertErr.message}` });
+        }
+        console.log(`[DB-INSERT-SUCCESS] Record inserted successfully into "${actualTableName}" with ID: ${this.lastID}`);
+        logActivity('数据库管理', `向数据表 "${actualTableName}" 插入了新记录 (ID: ${this.lastID})`);
+        res.status(201).json({ message: 'Record inserted successfully.', id: this.lastID, ...recordData });
+      });
+    });
+  });
+
+  // GET data from a user-defined table
+  app.get('/api/user-tables/:tableId/data', (req, res) => {
+    const { tableId } = req.params;
+    db.get('SELECT actualTableName, schemaJson FROM user_tables_metadata WHERE id = ?', [tableId], (err, row) => {
+      if (err) {
+        console.error(`[DB-GET-METADATA-ERROR] Error fetching metadata for tableId ${tableId}:`, err.message);
+        return res.status(500).json({ error: err.message });
+      }
+      if (!row || !row.actualTableName) {
+        console.warn(`[DB-GET-METADATA-WARN] User table not found or actual table name not set for tableId ${tableId}.`);
+        return res.status(404).json({ error: 'User table not found or actual table name not set.' });
+      }
+
+      const actualTableName = row.actualTableName;
+      const schema = JSON.parse(row.schemaJson || '[]');
+
+      const sql = `SELECT * FROM "${actualTableName}"`;
+      console.log(`[DB-SELECT] Executing SQL: ${sql}`);
+
+      db.all(sql, [], (dataErr, rows) => {
+        if (dataErr) {
+          console.error(`[DB-SELECT-ERROR] Failed to fetch data from table "${actualTableName}": ${dataErr.message}`);
+          return res.status(500).json({ error: `Failed to fetch data from table "${actualTableName}": ${dataErr.message}` });
+        }
+        console.log(`[DB-SELECT-SUCCESS] Fetched ${rows.length} rows from "${actualTableName}".`);
+
+        // Convert data types back to frontend expectations based on schema
+        const convertedRows = rows.map(record => {
+          const newRecord = { ...record };
+          for (const field of schema) {
+            if (newRecord.hasOwnProperty(field.name)) {
+              if (field.type.toLowerCase() === 'boolean') {
+                newRecord[field.name] = Boolean(newRecord[field.name]); // Convert 0/1 to false/true
+              } else if (field.type.toLowerCase() === 'number') {
+                newRecord[field.name] = Number(newRecord[field.name]); // Ensure it's a number
+              }
+              // Add other type conversions if necessary (e.g., date strings to Date objects)
+            }
+          }
+          return newRecord;
+        });
+        res.json(convertedRows);
+      });
+    });
+  });
+
+  // DELETE a user table metadata and the actual table
   app.delete('/api/user-tables/:id', (req, res) => {
     const { id } = req.params;
-    db.run('DELETE FROM user_tables_metadata WHERE id = ?', [id], function (err) {
+
+    // First, get the actualTableName from metadata
+    db.get('SELECT actualTableName, name FROM user_tables_metadata WHERE id = ?', [id], (err, row) => {
       if (err) {
-        res.status(500).json({ error: err.message });
-        return;
+        return res.status(500).json({ error: err.message });
       }
-      if (this.changes === 0) {
-        res.status(404).json({ error: 'User table metadata not found.' });
-        return;
+      if (!row) {
+        return res.status(404).json({ error: 'User table metadata not found.' });
       }
-      res.json({ message: 'User table metadata deleted successfully.', id });
+
+      const { actualTableName, name: tableName } = row;
+
+      // Delete the metadata record
+      db.run('DELETE FROM user_tables_metadata WHERE id = ?', [id], function (deleteMetadataErr) {
+        if (deleteMetadataErr) {
+          return res.status(500).json({ error: deleteMetadataErr.message });
+        }
+        if (this.changes === 0) {
+          return res.status(404).json({ error: 'User table metadata not found.' });
+        }
+
+        // If metadata deleted, then drop the actual table
+        if (actualTableName) {
+          const dropTableSql = `DROP TABLE IF EXISTS "${actualTableName}"`;
+          db.run(dropTableSql, [], (dropTableErr) => {
+            if (dropTableErr) {
+              console.error(`Error dropping actual table ${actualTableName}:`, dropTableErr.message);
+              // Continue with response even if table drop fails, as metadata is already gone
+            } else {
+              logActivity('数据库管理', `删除了数据表: "${tableName}"`);
+            }
+            res.json({ message: 'User table and metadata deleted successfully.', id });
+          });
+        } else {
+          logActivity('数据库管理', `删除了数据表元数据: "${tableName}" (无实际表关联)`);
+          res.json({ message: 'User table metadata deleted successfully (no actual table to drop).', id });
+        }
+      });
     });
   });
 

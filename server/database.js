@@ -92,8 +92,26 @@ const initDatabase = () => {
               name TEXT NOT NULL,
               description TEXT,
               schemaJson TEXT NOT NULL, -- JSON string representing the table schema (fields)
+              actualTableName TEXT, -- New column to store the actual table name
               FOREIGN KEY (projectId) REFERENCES projects (id)
           )`);
+          // Add actualTableName column if it doesn't exist (for existing databases)
+          db.all("PRAGMA table_info(user_tables_metadata)", (err, rows) => {
+            if (err) {
+              console.error("Error checking user_tables_metadata table info:", err.message);
+              return;
+            }
+            const columns = Array.isArray(rows) ? rows.map(col => col.name) : [];
+            if (!columns.includes('actualTableName')) {
+              db.run(`ALTER TABLE user_tables_metadata ADD COLUMN actualTableName TEXT`, (err) => {
+                if (err) {
+                  console.error("Error adding actualTableName column to user_tables_metadata table:", err.message);
+                } else {
+                  console.log("Added 'actualTableName' column to 'user_tables_metadata' table.");
+                }
+              });
+            }
+          });
 
           // Users Table for authentication
           db.run(`CREATE TABLE IF NOT EXISTS users (

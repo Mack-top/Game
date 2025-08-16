@@ -46,25 +46,10 @@ const ProjectDetails: React.FC = () => {
       </Card>
 
       <Tabs value={getActiveTab()} className="w-full">
-        <TabsList className="grid w-full grid-cols-4 bg-gray-700 mb-4">
+        <TabsList className="grid w-full grid-cols-1 bg-gray-700 mb-4">
           <TabsTrigger value="dashboard" asChild>
             <Link to={`/admin/project/${projectId}`} className="data-[state=active]:bg-blue-600 data-[state=active]:text-white text-gray-300 hover:text-white">
               仪表盘
-            </Link>
-          </TabsTrigger>
-          <TabsTrigger value="assets" asChild>
-            <Link to={`/admin/project/${projectId}/assets`} className="data-[state=active]:bg-blue-600 data-[state=active]:text-white text-gray-300 hover:text-white">
-              资产管理
-            </Link>
-          </TabsTrigger>
-          <TabsTrigger value="gameplay" asChild>
-            <Link to={`/admin/project/${projectId}/gameplay`} className="data-[state=active]:bg-blue-600 data-[state=active]:text-white text-gray-300 hover:text-white">
-              玩法管理
-            </Link>
-          </TabsTrigger>
-          <TabsTrigger value="database" asChild>
-            <Link to={`/admin/project/${projectId}/database`} className="data-[state=active]:bg-blue-600 data-[state=active]:text-white text-gray-300 hover:text-white">
-              数据库管理
             </Link>
           </TabsTrigger>
         </TabsList>

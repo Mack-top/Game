@@ -41,6 +41,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const adminNavItems = [
     { name: "项目总览", path: "/admin/overview" },
     { name: "用户管理", path: "/admin/users" },
+    { name: "资产管理", path: "/admin/assets" },
+    { name: "玩法管理", path: "/admin/gameplay" },
+    { name: "数据库管理", path: "/admin/database" },
   ];
 
   const username = user ? user.username : 'Guest';
